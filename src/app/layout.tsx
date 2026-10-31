@@ -1,0 +1,3 @@
+import type {Metadata} from 'next';import './globals.css';import './public-pages.css';import './page-detail.css';import './admin.css';
+export const metadata:Metadata={metadataBase:new URL(process.env.NEXT_PUBLIC_SITE_URL||'https://hanumanjiagro.com'),title:{default:'Hanumanji Agro | The Art of Sourcing Nature',template:'%s | Hanumanji Agro'},description:'Agricultural sourcing from Northeast India. A family legacy in Kalimpong since 1976.',openGraph:{title:'Hanumanji Agro',description:'Rooted in the Northeast. Connected to the world.',type:'website',images:['/media/northeast-hero.jpg']}};
+export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="en"><body>{children}</body></html>}

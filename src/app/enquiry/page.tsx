@@ -1,0 +1,3 @@
+import type {Metadata} from 'next';import PublicShell from '@/components/public/PublicShell';import EnquiryPageForm from '@/components/public/EnquiryPageForm';
+export const metadata:Metadata={title:'Your enquiry',description:'Review your selected products and request a quotation from Hanumanji Agro.'};
+export default function EnquiryPage(){return <PublicShell><main className="enquiry-page"><div className="enquiry-page-heading"><span className="eyebrow-dark">A considered conversation</span><h1>Your sourcing<br/><i>enquiry.</i></h1><p>Tell us a little about your requirement. Our team will follow up to discuss product, availability and quotation.</p></div><EnquiryPageForm/></main></PublicShell>}

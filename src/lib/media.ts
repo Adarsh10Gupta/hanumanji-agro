@@ -1,0 +1,3 @@
+export const media={logo:'/brand-logo.jpg',hero:'/media/northeast-hero.jpg',ginger:'/media/ginger-source.jpg',cardamom:'/media/cardamom-still-life.jpg',botanicals:'/media/botanical-still-life.jpg'} as const;
+const productImages:Record<string,string>={'fresh-ginger':media.ginger,turmeric:media.ginger,'large-black-cardamom':media.cardamom,'dried-ginger-ginger-chips':media.ginger,'orange-lemon-peel':media.botanicals,'majista-timur-pipla':media.botanicals,'dried-beetroot-bitter-gourd':media.botanicals,'herbal-medicinal-plant-materials':media.botanicals,'other-regional-produce':media.ginger};
+export function productImage(slug:string,image?:string){return image&&!image.includes('images.unsplash.com')?image:productImages[slug]||media.botanicals;}

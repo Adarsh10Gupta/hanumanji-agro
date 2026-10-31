@@ -1,0 +1,1 @@
+import {redirect} from 'next/navigation';import EnquiryDetail from '@/components/admin/EnquiryDetail';import {owner} from '@/lib/auth';export default async function EnquiryPage({params}:{params:Promise<{id:string}>}){if(!await owner())redirect('/admin/login');const {id}=await params;return <EnquiryDetail id={id}/>}
