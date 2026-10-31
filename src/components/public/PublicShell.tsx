@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ReactNode, useState } from 'react';
 import { phoneDigits, usePublicSettings } from '@/lib/use-public-settings';
 
-const links = [['About', '/about'], ['Products', '/products'], ['Sourcing', '/sourcing'], ['Farmers', '/farmers'], ['Business', '/business-enquiries'], ['Contact', '/contact']] as const;
+const links = [['About', '/about'], ['Products', '/products'], ['Buy / Sell', '/sourcing'], ['Farmers', '/farmers'], ['Business', '/business-enquiries'], ['Contact', '/contact']] as const;
 
 export default function PublicShell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);

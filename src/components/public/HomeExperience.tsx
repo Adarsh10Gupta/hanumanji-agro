@@ -28,7 +28,7 @@ export function Header({ onEnquire, cartCount }: { onEnquire: () => void; cartCo
   const settings = usePublicSettings();
   useEffect(() => { const update = () => setScrolled(window.scrollY > 32); update(); window.addEventListener('scroll', update, { passive: true }); return () => window.removeEventListener('scroll', update); }, []);
   useEffect(() => { document.body.classList.toggle('menu-open', menuOpen); return () => document.body.classList.remove('menu-open'); }, [menuOpen]);
-  const nav = [{ label: 'Our story', href: '/about' }, { label: 'Products', href: '/products' }, { label: 'Sourcing', href: '/sourcing' }, { label: 'Farmers', href: '/farmers' }, { label: 'Business', href: '/business-enquiries' }];
+  const nav = [{ label: 'Our story', href: '/about' }, { label: 'Products', href: '/products' }, { label: 'Buy / Sell', href: '/sourcing' }, { label: 'Farmers', href: '/farmers' }, { label: 'Business', href: '/business-enquiries' }];
   return <>
     <div className="announcement"><span>{settings.location}</span><span>Family agricultural trade since 1976</span></div>
     <header className={`site-header${scrolled ? ' is-scrolled' : ''}`}>
