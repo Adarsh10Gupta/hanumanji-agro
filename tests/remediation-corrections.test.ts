@@ -2,14 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
+  addKeyWithinCapacity,
   dailyBudgetBucket,
   nextUtcDay,
+  queueReservationStore,
   reconcileQueueReservations,
   reserveBudgetReservation,
   reserveQueueReservation,
   type QueueReservation,
   type QueueReservationStore,
 } from '../src/lib/email-budget';
+import { EmailDailyBudget, EmailQueueState } from '../src/lib/models';
 import { commitLeasedNotification, shouldRetryEmail } from '../src/lib/email-outbox';
 import { indexMatches, type IndexDefinition } from '../src/lib/index-verification';
 import { pageCount, pageSlice, PUBLIC_PRODUCT_PAGE_SIZE } from '../src/lib/catalog-pagination';
@@ -48,6 +51,14 @@ function memoryQueue(initial: QueueReservation[] = []): QueueReservationStore & 
     },
   };
 }
+
+type MockReservationUpdate = {
+  $addToSet?: { keys?: string };
+  $push?: { reservations: QueueReservation };
+  $set?: Record<string, unknown>;
+  $pull?: Record<string, unknown>;
+};
+type MockUpdateOptions = { upsert?: boolean };
 
 test('index verification checks index name, ordered keys, and all relevant options', () => {
   const expected: IndexDefinition = {
@@ -159,6 +170,202 @@ test('daily budget is reserved per delivery UTC day and concurrent sends stay wi
   assert.match(emailSource, /reserveDailyEmail/);
   assert.match(workerSource, /nextUtcDay\(completedAt\)/);
   assert.match(workerSource, /\$inc:\s*\{\s*attempts:\s*-1\s*\}/);
+});
+
+test('concurrent first daily-budget reservations recover duplicate-key race while capacity remains', async (t) => {
+  let keys: string[] | null = null;
+  let upsertCalls = 0;
+  let releaseInitialCalls!: () => void;
+  const initialCalls = new Promise<void>((resolve) => { releaseInitialCalls = resolve; });
+
+  t.mock.method(EmailDailyBudget, 'findOneAndUpdate', async (_filter: unknown, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    const key = update.$addToSet?.keys as string;
+    if (options?.upsert) {
+      upsertCalls += 1;
+      if (upsertCalls === 2) releaseInitialCalls();
+      await initialCalls;
+      if (key === 'first') {
+        keys = [key];
+        return { keys: [...keys] } as never;
+      }
+      const error = Object.assign(new Error('duplicate key'), { code: 11000 });
+      throw error;
+    }
+
+    if (!keys || keys.length >= 2) return null as never;
+    keys.push(key);
+    return { keys: [...keys] } as never;
+  });
+  t.mock.method(EmailDailyBudget, 'findById', () => ({
+    select: () => ({ lean: async () => ({ keys: keys ? [...keys] : [] }) }),
+  }) as never);
+
+  const results = await Promise.all([
+    addKeyWithinCapacity(EmailDailyBudget, 'test-day', 'first', 2),
+    addKeyWithinCapacity(EmailDailyBudget, 'test-day', 'second', 2),
+  ]);
+  assert.deepEqual(results, [true, true]);
+  assert.equal(upsertCalls, 2);
+  assert.deepEqual(new Set(keys), new Set(['first', 'second']));
+});
+
+test('daily-budget duplicate-key recovery returns false only when capacity is full', async (t) => {
+  let keys = ['existing'];
+  let upsertFalseRetries = 0;
+  t.mock.method(EmailDailyBudget, 'findOneAndUpdate', async (_filter: unknown, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    if (options?.upsert) {
+      throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    }
+    upsertFalseRetries += 1;
+    if (keys.length >= 1) return null as never;
+    keys = [...keys, update.$addToSet?.keys as string];
+    return { keys: [...keys] } as never;
+  });
+  t.mock.method(EmailDailyBudget, 'findById', () => ({
+    select: () => ({ lean: async () => ({ keys: [...keys] }) }),
+  }) as never);
+
+  assert.equal(await addKeyWithinCapacity(EmailDailyBudget, 'test-day', 'new-key', 1), false);
+  assert.equal(upsertFalseRetries, 1);
+});
+
+test('daily-budget duplicate key for an existing reservation remains idempotent', async (t) => {
+  const keys = ['same-key'];
+  let upsertFalseRetries = 0;
+  t.mock.method(EmailDailyBudget, 'findOneAndUpdate', async (_filter: unknown, _update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    if (options?.upsert) throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    upsertFalseRetries += 1;
+    return { keys } as never;
+  });
+  t.mock.method(EmailDailyBudget, 'findById', () => ({
+    select: () => ({ lean: async () => ({ keys }) }),
+  }) as never);
+
+  assert.equal(await addKeyWithinCapacity(EmailDailyBudget, 'test-day', 'same-key', 1), true);
+  assert.equal(upsertFalseRetries, 0);
+});
+
+test('concurrent first queue reservations recover duplicate-key race when capacity remains', async (t) => {
+  const state: { reservations: QueueReservation[] | null } = { reservations: null };
+  let upsertCalls = 0;
+  let releaseInitialCalls!: () => void;
+  const initialCalls = new Promise<void>((resolve) => { releaseInitialCalls = resolve; });
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async (_filter: unknown, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    if (options?.upsert) {
+      upsertCalls += 1;
+      if (upsertCalls === 2) releaseInitialCalls();
+      await initialCalls;
+      if (update.$push?.reservations.key === 'first') {
+        state.reservations = [{ key: 'first', reservedAt: new Date(0) }];
+        return { reservations: [...state.reservations] } as never;
+      }
+      throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    }
+    if (update.$set) return null as never;
+    if (update.$pull) return null as never;
+    if (!state.reservations || state.reservations.length >= 2) return null as never;
+    state.reservations.push(update.$push?.reservations as QueueReservation);
+    return { reservations: [...state.reservations] } as never;
+  });
+
+  const reservedAt = new Date('2026-11-05T10:00:00Z');
+  const results = await Promise.all([
+    queueReservationStore.reserveIfRoom('first', reservedAt, 2),
+    queueReservationStore.reserveIfRoom('second', reservedAt, 2),
+  ]);
+  assert.deepEqual(results, [true, true]);
+  assert.equal(upsertCalls, 2);
+  assert.deepEqual(new Set(state.reservations?.map(({ key }) => key)), new Set(['first', 'second']));
+});
+
+test('queue reservation retry respects full capacity and unrelated database errors propagate', async (t) => {
+  let upsertFalseRetries = 0;
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async (_filter: unknown, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    if (options?.upsert) throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    if (update.$set || update.$pull) return null as never;
+    upsertFalseRetries += 1;
+    return null as never;
+  });
+  assert.equal(await queueReservationStore.reserveIfRoom('new-key', new Date(), 1), false);
+  assert.equal(upsertFalseRetries, 1);
+});
+
+test('queue reservation unrelated database errors propagate', async (t) => {
+  const databaseError = new Error('database unavailable');
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async () => { throw databaseError; });
+  await assert.rejects(queueReservationStore.reserveIfRoom('new-key', new Date(), 1), databaseError);
+});
+
+test('same queue reservation key is idempotent through refresh', async (t) => {
+  const reservations: QueueReservation[] = [{ key: 'same-key', reservedAt: new Date(0) }];
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async (_filter: unknown, update: MockReservationUpdate) => {
+    if (update.$set) return { reservations: [{ key: 'same-key', reservedAt: update.$set['reservations.$.reservedAt'] }] } as never;
+    return null as never;
+  });
+
+  assert.equal(await reserveQueueReservation(queueReservationStore, 'same-key', 1), true);
+});
+
+test('concurrent ensureActive calls recover distinct reservations after first document creation', async (t) => {
+  const state: { reservations: QueueReservation[] | null } = { reservations: null };
+  let upsertCalls = 0;
+  let releaseInitialCalls!: () => void;
+  const initialCalls = new Promise<void>((resolve) => { releaseInitialCalls = resolve; });
+
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async (filter: Record<string, unknown>, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    const pushedKey = update.$push?.reservations.key;
+    if (update.$set) {
+      const current = state.reservations?.find(({ key }) => key === pushedKey);
+      return current ? { reservations: state.reservations } as never : null as never;
+    }
+    if (filter.keys) return null as never;
+    if (options?.upsert) {
+      upsertCalls += 1;
+      if (upsertCalls === 2) releaseInitialCalls();
+      await initialCalls;
+      if (pushedKey === 'first-active') {
+        state.reservations = [{ key: pushedKey, reservedAt: update.$push!.reservations.reservedAt }];
+        return { reservations: [...state.reservations] } as never;
+      }
+      throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    }
+    const existing = state.reservations ?? [];
+    if (existing.some(({ key }) => key === pushedKey)) return { reservations: existing } as never;
+    state.reservations = [...existing, update.$push!.reservations];
+    return { reservations: [...state.reservations] } as never;
+  });
+
+  const reservedAt = new Date('2026-11-20T08:00:00Z');
+  await Promise.all([
+    queueReservationStore.ensureActive('first-active', reservedAt),
+    queueReservationStore.ensureActive('second-active', reservedAt),
+  ]);
+  assert.equal(upsertCalls, 2);
+  assert.deepEqual(new Set(state.reservations?.map(({ key }) => key)), new Set(['first-active', 'second-active']));
+});
+
+test('ensureActive duplicate-key recovery refreshes an existing key without duplicating it', async (t) => {
+  const state = { reservations: [{ key: 'active-key', reservedAt: new Date(0) }] as QueueReservation[] };
+  let upsertFalseRetries = 0;
+  t.mock.method(EmailQueueState, 'findOneAndUpdate', async (filter: Record<string, unknown>, update: MockReservationUpdate, options?: MockUpdateOptions) => {
+    if (update.$set) {
+      const reservation = state.reservations.find(({ key }) => key === 'active-key');
+      if (reservation) reservation.reservedAt = update.$set['reservations.$.reservedAt'] as Date;
+      return reservation ? { reservations: [...state.reservations] } as never : null as never;
+    }
+    if (filter.keys) return null as never;
+    if (options?.upsert) throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    upsertFalseRetries += 1;
+    if (!state.reservations.some(({ key }) => key === update.$push?.reservations.key)) {
+      state.reservations.push(update.$push!.reservations);
+    }
+    return { reservations: [...state.reservations] } as never;
+  });
+
+  await queueReservationStore.ensureActive('active-key', new Date('2026-11-20T09:00:00Z'));
+  assert.equal(upsertFalseRetries, 0);
+  assert.equal(state.reservations.length, 1);
+  assert.equal(state.reservations[0].key, 'active-key');
 });
 
 test('product pagination covers every record beyond 500 without overlap', () => {

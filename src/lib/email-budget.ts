@@ -61,14 +61,15 @@ export function nextUtcDay(now = new Date()) {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
 }
 
-async function addKeyWithinCapacity(model: typeof EmailQueueState | typeof EmailDailyBudget, id: string, key: string, limit: number, expiresAt?: Date) {
+export async function addKeyWithinCapacity(model: typeof EmailQueueState | typeof EmailDailyBudget, id: string, key: string, limit: number, expiresAt?: Date) {
   const update = {
     $addToSet: { keys: key },
     ...(expiresAt ? { $setOnInsert: { expiresAt } } : {}),
   };
+  const filter = { _id: id, $expr: { $lt: [{ $size: { $ifNull: ['$keys', []] } }, limit] } };
   try {
     const row = await model.findOneAndUpdate(
-      { _id: id, $expr: { $lt: [{ $size: { $ifNull: ['$keys', []] } }, limit] } },
+      filter,
       update,
       { upsert: true, new: true },
     );
@@ -76,7 +77,9 @@ async function addKeyWithinCapacity(model: typeof EmailQueueState | typeof Email
   } catch (error) {
     if ((error as { code?: number })?.code !== 11000) throw error;
     const row = await model.findById(id).select('keys').lean();
-    return Boolean(row?.keys?.includes(key));
+    if (row?.keys?.includes(key)) return true;
+    const retriedRow = await model.findOneAndUpdate(filter, update, { upsert: false, new: true });
+    return Boolean(retriedRow?.keys?.includes(key));
   }
 }
 
@@ -86,7 +89,7 @@ export async function reservePendingEmail(key: string) {
   return reserveQueueReservation(queueReservationStore, hashedKey, emailQueueCapacity());
 }
 
-const queueReservationStore: QueueReservationStore = {
+export const queueReservationStore: QueueReservationStore = {
   async refresh(key, reservedAt) {
     const row = await EmailQueueState.findOneAndUpdate(
       { _id: 'pending', reservations: { $elemMatch: { key } } },
@@ -102,30 +105,38 @@ const queueReservationStore: QueueReservationStore = {
     return Boolean(legacy);
   },
   async reserveIfRoom(key, reservedAt, limit) {
-    try {
-      const row = await EmailQueueState.findOneAndUpdate(
-        {
-          _id: 'pending',
-          reservations: { $not: { $elemMatch: { key } } },
-          $expr: {
-            $lt: [
-              {
-                $add: [
-                  { $size: { $ifNull: ['$keys', []] } },
-                  { $size: { $ifNull: ['$reservations', []] } },
-                ],
-              },
-              limit,
+    const filter = {
+      _id: 'pending',
+      reservations: { $not: { $elemMatch: { key } } },
+      $expr: {
+        $lt: [
+          {
+            $add: [
+              { $size: { $ifNull: ['$keys', []] } },
+              { $size: { $ifNull: ['$reservations', []] } },
             ],
           },
-        },
-        { $push: { reservations: { key, reservedAt } } },
+          limit,
+        ],
+      },
+    };
+    const update = { $push: { reservations: { key, reservedAt } } };
+    try {
+      const row = await EmailQueueState.findOneAndUpdate(
+        filter,
+        update,
         { upsert: true, new: true },
       );
       return Boolean(row?.reservations?.some((reservation: QueueReservation) => reservation.key === key));
     } catch (error) {
       if ((error as { code?: number })?.code !== 11000) throw error;
-      return this.refresh(key, reservedAt);
+      if (await this.refresh(key, reservedAt)) return true;
+      const row = await EmailQueueState.findOneAndUpdate(
+        filter,
+        update,
+        { upsert: false, new: true },
+      );
+      return Boolean(row?.reservations?.some((reservation: QueueReservation) => reservation.key === key));
     }
   },
   async list() {
@@ -148,15 +159,22 @@ const queueReservationStore: QueueReservationStore = {
   },
   async ensureActive(key, reservedAt) {
     if (await this.refresh(key, reservedAt)) return;
+    const filter = { _id: 'pending', reservations: { $not: { $elemMatch: { key } } } };
+    const update = { $push: { reservations: { key, reservedAt } } };
     try {
       await EmailQueueState.findOneAndUpdate(
-        { _id: 'pending', reservations: { $not: { $elemMatch: { key } } } },
-        { $push: { reservations: { key, reservedAt } } },
+        filter,
+        update,
         { upsert: true, new: true },
       );
     } catch (error) {
       if ((error as { code?: number })?.code !== 11000) throw error;
-      await this.refresh(key, reservedAt);
+      if (await this.refresh(key, reservedAt)) return;
+      await EmailQueueState.findOneAndUpdate(
+        filter,
+        update,
+        { upsert: false, new: true },
+      );
     }
   },
 };
