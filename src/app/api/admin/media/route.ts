@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { owner } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { AuditLog, Category, Product } from '@/lib/models';
-import { sameOrigin, tooLarge } from '@/lib/security';
+import { readJsonBody, sameOrigin } from '@/lib/security';
 
 function credentials() {
   const cloud = process.env.CLOUDINARY_CLOUD_NAME;
@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
     const result = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(config.cloud)}/resources/image/upload?${params}`, {
       headers: { Authorization: `Basic ${Buffer.from(`${config.key}:${config.secret}`).toString('base64')}` },
       cache: 'no-store',
+      signal: AbortSignal.timeout(15_000),
     });
     if (!result.ok) return NextResponse.json({ error: 'Cloudinary could not load the media library.' }, { status: 502 });
     const data = await result.json();
@@ -37,13 +38,13 @@ const deleteSchema = z.object({ publicId: z.string().trim().min(1).max(255).rege
 export async function DELETE(req: NextRequest) {
   const admin = await owner();
   if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const large = tooLarge(req, 4 * 1024);
-  if (large) return large;
   if (!sameOrigin(req)) return NextResponse.json({ error: 'Invalid request.' }, { status: 403 });
+  const body = await readJsonBody(req, 4 * 1024);
+  if (!body.ok) return body.response;
   const config = credentials();
   if (!config) return NextResponse.json({ error: 'Cloudinary is not configured.' }, { status: 503 });
   try {
-    const parsed = deleteSchema.safeParse(await req.json());
+    const parsed = deleteSchema.safeParse(body.data);
     if (!parsed.success) return NextResponse.json({ error: 'Invalid media identifier.' }, { status: 400 });
     const publicId = parsed.data.publicId;
     await db();
@@ -61,7 +62,11 @@ export async function DELETE(req: NextRequest) {
     form.set('timestamp', String(timestamp));
     form.set('api_key', config.key);
     form.set('signature', signature);
-    const result = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(config.cloud)}/image/destroy`, { method: 'POST', body: form });
+    const result = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(config.cloud)}/image/destroy`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(15_000),
+    });
     const data = await result.json();
     if (!result.ok || data.result !== 'ok' && data.result !== 'not found') return NextResponse.json({ error: 'Cloudinary could not delete this image.' }, { status: 502 });
     await AuditLog.create({ actor: admin._id, action: 'media.delete', entity: 'Cloudinary', entityId: publicId });

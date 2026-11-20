@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { owner } from '@/lib/auth';
 import { db } from '@/lib/db';
-import { enquiryOwnerEmail, sendEmail } from '@/lib/email';
+import { enquiryOwnerEmail } from '@/lib/email';
+import { enqueueEmailNotification } from '@/lib/email-outbox';
 import { Enquiry, SiteSettings } from '@/lib/models';
 import { audit, sameOrigin, tooLarge } from '@/lib/security';
 
@@ -22,7 +23,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (settings?.notificationPreferences?.ownerEmail === false) return NextResponse.json({ error: 'Owner email notifications are disabled in settings.' }, { status: 409 });
     const to = process.env.OWNER_NOTIFICATION_EMAIL || settings?.notificationEmail;
     if (!to) return NextResponse.json({ error: 'Owner notification email is not configured.' }, { status: 503 });
-    const delivery = await sendEmail({
+    const delivery = await enqueueEmailNotification({
+      key: `enquiry-owner/${enquiry.reference}`,
+      kind: 'enquiry-owner',
       to,
       subject: `New enquiry ${enquiry.reference} · Hanumanji Agro`,
       html: enquiryOwnerEmail({
@@ -42,19 +45,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           grade: item.snapshot?.grade,
         })),
       }),
-      idempotencyKey: `enquiry-owner/${enquiry.reference}`,
-    });
-    enquiry.notificationStatus = delivery.status;
-    if (delivery.id) enquiry.notificationId = delivery.id;
-    await enquiry.save();
+      entityType: 'Enquiry',
+      entityId: String(enquiry._id),
+      statusField: 'notificationStatus',
+      idField: 'notificationId',
+    }, true);
+    if (!delivery.queued && delivery.status !== 'sent') {
+      enquiry.notificationStatus = 'failed';
+      await enquiry.save();
+    }
     await audit(admin._id, 'notification.enquiry_retry', 'Enquiry', id, {
       provider: 'Resend',
       status: delivery.status,
+      queued: delivery.queued,
       ...(delivery.id ? { providerMessageId: delivery.id } : {}),
       ...(delivery.errorCode ? { errorCode: delivery.errorCode } : {}),
       ...(delivery.httpStatus ? { httpStatus: delivery.httpStatus } : {}),
     });
-    return NextResponse.json({ status: delivery.status });
+    return NextResponse.json({ status: delivery.status, duplicate: delivery.duplicate || false });
   } catch {
     return NextResponse.json({ error: 'Unable to retry the owner notification.' }, { status: 503 });
   }

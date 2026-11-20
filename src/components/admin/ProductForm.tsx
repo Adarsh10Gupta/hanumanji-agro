@@ -14,6 +14,7 @@ type ProductDraft = {
 export default function ProductForm({ product }: { product?: ProductDraft }) {
   const router = useRouter();
   const [categories, setCategories] = useState<any[]>([]);
+  const [categoryQuery, setCategoryQuery] = useState(product?.category || '');
   const [images, setImages] = useState<string[]>(product?.images?.length ? product.images : product?.image ? [product.image] : []);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -21,14 +22,39 @@ export default function ProductForm({ product }: { product?: ProductDraft }) {
   const [specText, setSpecText] = useState(JSON.stringify(product?.specifications || {}, null, 2));
 
   useEffect(() => {
-    fetch('/api/admin/categories')
-      .then(async (response) => { if (!response.ok) throw new Error('Unable to load categories.'); return response.json(); })
-      .then(setCategories)
-      .catch(() => setError('Categories could not be loaded. Retry the page or create a category first.'));
-  }, []);
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      if (!categoryQuery.trim()) {
+        setCategories([]);
+        return;
+      }
+      try {
+        const response = await fetch(`/api/admin/categories?search=${encodeURIComponent(categoryQuery)}&page=1`);
+        if (!response.ok) throw new Error('Unable to load categories.');
+        const result = await response.json();
+        if (!Array.isArray(result.categories)) throw new Error('Unexpected category response.');
+        if (active) setCategories(result.categories);
+      } catch {
+        if (active) setError('Categories could not be loaded. Retry the page or create a category first.');
+      }
+    }, 200);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [categoryQuery]);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
+    const availableSlots = 10 - images.length;
+    if (availableSlots <= 0) {
+      setError('A product can have at most 10 images.');
+      return;
+    }
+    if (files.length > availableSlots) {
+      setError(`Select no more than ${availableSlots} additional image${availableSlots === 1 ? '' : 's'}.`);
+      return;
+    }
     setUploading(true);
     setError('');
     for (const file of Array.from(files)) {
@@ -67,17 +93,27 @@ export default function ProductForm({ product }: { product?: ProductDraft }) {
     setBusy(true);
     setError('');
     const form = new FormData(event.currentTarget);
+    if (!categories.some((category) => category.name === categoryQuery)
+      && !(product?.category === categoryQuery)) {
+      setError('Choose an existing category from the matching suggestions.');
+      setBusy(false);
+      return;
+    }
     let specifications: Record<string, string>;
     try {
       specifications = JSON.parse(specText || '{}');
       if (!specifications || Array.isArray(specifications) || typeof specifications !== 'object') throw new Error();
+      if (!Object.entries(specifications).every(([key, value]) =>
+        typeof key === 'string' && key.trim().length > 0 && typeof value === 'string')) {
+        throw new Error();
+      }
     } catch {
       setError('Specifications must be a JSON object of labels and values.');
       setBusy(false);
       return;
     }
     const payload = {
-      name: String(form.get('name')), slug: String(form.get('slug')), category: String(form.get('category')),
+      name: String(form.get('name')), slug: String(form.get('slug')), category: categoryQuery,
       description: String(form.get('description')), shortDescription: String(form.get('shortDescription') || ''),
       fullDescription: String(form.get('fullDescription') || ''), images, image: images[0] || '', specifications,
       grade: String(form.get('grade') || ''), unit: String(form.get('unit') || 'kg'),
@@ -104,7 +140,7 @@ export default function ProductForm({ product }: { product?: ProductDraft }) {
     <div className="admin-form-grid">
       <label>Product name<input name="name" defaultValue={product?.name} required maxLength={150} /></label>
       <label>URL slug<input name="slug" defaultValue={product?.slug} required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /><small>Lowercase words separated by hyphens.</small></label>
-      <label>Category<select name="category" defaultValue={product?.category || ''} required><option value="" disabled>Select category</option>{categories.map((category) => <option key={category._id} value={category.name}>{category.name}</option>)}</select>{categories.length === 0 && <small><a href="/admin/categories">Create a category first.</a></small>}</label>
+      <label>Category<input name="category" list="product-categories" value={categoryQuery} onChange={(event) => setCategoryQuery(event.target.value)} required /><datalist id="product-categories">{categories.map((category) => <option key={category._id} value={category.name} />)}</datalist>{categories.length === 0 && <small><a href="/admin/categories">No matching category? Create one first.</a></small>}</label>
       <label>Availability<select name="status" defaultValue={product?.status || 'seasonal'}><option value="available">Available</option><option value="seasonal">Seasonal / confirm</option><option value="unavailable">Unavailable</option></select></label>
     </div>
     <label>Short description<input name="shortDescription" defaultValue={product?.shortDescription || product?.description} maxLength={300} /></label>

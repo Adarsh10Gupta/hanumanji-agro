@@ -4,7 +4,7 @@ import argon2 from 'argon2';
 import { endSession, owner, revokeAllSessions } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { Admin, AuditLog } from '@/lib/models';
-import { rateLimit, sameOrigin, tooLarge } from '@/lib/security';
+import { rateLimit, readJsonBody, sameOrigin, tooLarge } from '@/lib/security';
 
 const schema = z.object({ currentPassword: z.string().min(1).max(256), newPassword: z.string().min(16).max(256) });
 
@@ -17,7 +17,9 @@ export async function POST(req: NextRequest) {
   try {
     const limit = await rateLimit(req, 'admin-password-change', 5);
     if (!limit.allowed) return NextResponse.json({ error: 'Try again later.' }, { status: 429, headers: { 'Retry-After': String(limit.retryAfter) } });
-    const parsed = schema.safeParse(await req.json());
+    const body = await readJsonBody(req, 8 * 1024);
+    if (!body.ok) return body.response;
+    const parsed = schema.safeParse(body.data);
     if (!parsed.success) return NextResponse.json({ error: 'Use a new password with at least 16 characters.' }, { status: 400 });
     await db();
     const account = await Admin.findById(admin._id).select('+passwordHash');

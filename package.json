@@ -10,12 +10,14 @@
     "typecheck": "tsc --noEmit",
     "seed": "tsx scripts/seed.ts",
     "bootstrap-owner": "tsx scripts/bootstrap-owner.ts",
-    "test": "tsx --test tests/whatsapp.test.ts tests/enquiry-notifications.test.ts && node --test tests/*.test.mjs",
+    "test": "tsx --test tests/whatsapp.test.ts tests/enquiry-notifications.test.ts tests/security-protections.test.ts tests/remediation-corrections.test.ts && node --test tests/*.test.mjs",
     "db:verify": "tsx scripts/verify-db.ts",
+    "db:indexes:verify": "tsx scripts/verify-indexes.ts",
+    "notifications:worker": "tsx scripts/notification-worker.ts",
     "admin:bootstrap": "tsx scripts/bootstrap-owner.ts",
     "admin:diagnose-login": "tsx scripts/diagnose-admin-login.ts",
     "integrations:verify": "tsx scripts/verify-providers.ts",
-    "test:e2e": "tsx scripts/e2e-release.ts",
+    "test:e2e": "tsx scripts/e2e-release.ts --test-mode",
     "admin:reset-password": "tsx scripts/reset-owner-password.ts"
   },
   "dependencies": {

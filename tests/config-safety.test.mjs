@@ -32,9 +32,9 @@ test('Resend integration test action is owner-only and pins its recipient, sende
   assert.doesNotMatch(route, /console\.(?:log|error).*RESEND_API_KEY/);
 });
 
-test('application database helper is pinned to Hanumanji Agro and has bounded pooling', async () => {
+test('application database helper defaults to Hanumanji Agro and supports explicit isolated database overrides', async () => {
   const source = await readFile('src/lib/db.ts', 'utf8');
-  assert.match(source, /dbName:\s*'hanumanji_agro'/);
+  assert.match(source, /dbName:\s*process\.env\.MONGODB_DATABASE_NAME\s*\|\|\s*'hanumanji_agro'/);
   assert.match(source, /maxPoolSize:\s*10/);
   assert.match(source, /global\.mongooseCache/);
 });

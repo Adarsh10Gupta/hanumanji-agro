@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { owner } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { SiteSettings } from '@/lib/models';
-import { audit, sameOrigin, tooLarge } from '@/lib/security';
+import { audit, readJsonBody, sameOrigin } from '@/lib/security';
 import { DEFAULT_BUSINESS_WHATSAPP, formatWhatsAppNumber } from '@/lib/whatsapp-number';
 
 const schema = z.object({
@@ -65,11 +65,11 @@ export async function GET() {
 export async function PATCH(req: NextRequest) {
   const admin = await owner();
   if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const large = tooLarge(req);
-  if (large) return large;
   if (!sameOrigin(req)) return NextResponse.json({ error: 'Invalid request.' }, { status: 403 });
+  const body = await readJsonBody(req);
+  if (!body.ok) return body.response;
   try {
-    const { whatsapp } = whatsappSchema.parse(await req.json());
+    const { whatsapp } = whatsappSchema.parse(body.data);
     await db();
     await SiteSettings.findOneAndUpdate(
       { key: 'main' },
@@ -87,11 +87,11 @@ export async function PATCH(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const admin = await owner();
   if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const large = tooLarge(req);
-  if (large) return large;
   if (!sameOrigin(req)) return NextResponse.json({ error: 'Invalid request.' }, { status: 403 });
+  const body = await readJsonBody(req);
+  if (!body.ok) return body.response;
   try {
-    const data = schema.parse(await req.json());
+    const data = schema.parse(body.data);
     await db();
     const { whatsapp, ...otherSettings } = data;
     const settings = await SiteSettings.findOneAndUpdate(

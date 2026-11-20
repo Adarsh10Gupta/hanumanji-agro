@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { owner } from '@/lib/auth';
 import { db } from '@/lib/db';
-import { sendEmail, statusUpdateEmail } from '@/lib/email';
+import { statusUpdateEmail } from '@/lib/email';
+import { enqueueEmailNotification } from '@/lib/email-outbox';
 import { Enquiry, SiteSettings } from '@/lib/models';
-import { audit, sameOrigin, tooLarge } from '@/lib/security';
+import { audit, readJsonBody, sameOrigin } from '@/lib/security';
+import { randomUUID } from 'node:crypto';
+import { enqueueOrderStatusNotification, orderStatusNotificationAllowed } from '@/lib/order-status-notifications';
 
 const statuses = ['New', 'Contacted', 'Quotation Sent', 'Accepted', 'Processing', 'Dispatched', 'Completed', 'Rejected', 'Cancelled'] as const;
 const quotationSchema = z.object({
@@ -29,22 +32,18 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const admin = await owner();
   if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const large = tooLarge(req);
-  if (large) return large;
   if (!sameOrigin(req)) return NextResponse.json({ error: 'Invalid request.' }, { status: 403 });
+  const body = await readJsonBody(req);
+  if (!body.ok) return body.response;
   try {
-    const data = updateSchema.parse(await req.json());
+    const data = updateSchema.parse(body.data);
     const { id } = await params;
     await db();
     const enquiry: any = await Enquiry.findById(id);
     if (!enquiry) return NextResponse.json({ error: 'Enquiry not found.' }, { status: 404 });
     const previousStatus = enquiry.status;
-    const statusChanged = !!data.status && data.status !== previousStatus;
+    let statusChanged = !!data.status && data.status !== previousStatus;
 
-    if (statusChanged) {
-      enquiry.status = data.status;
-      enquiry.statusHistory.push({ status: data.status, at: new Date(), actor: admin._id });
-    }
     if (data.notes !== undefined) enquiry.notes = data.notes;
     if (data.quotation) {
       const total = data.quotation.lines.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) + data.quotation.transport + data.quotation.additionalCharges;
@@ -60,25 +59,51 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       enquiry.quotation = nextQuotation;
     }
     await enquiry.save();
+    if (statusChanged && data.status) {
+      const transitioned = await Enquiry.updateOne(
+        { _id: id, status: previousStatus },
+        { $set: { status: data.status }, $push: { statusHistory: { status: data.status, at: new Date(), actor: admin._id } } },
+      );
+      statusChanged = transitioned.modifiedCount === 1;
+      if (statusChanged) enquiry.status = data.status;
+    }
     await audit(admin._id, 'enquiry.update', 'Enquiry', id, { status: data.status });
 
     let statusNotification: 'pending' | 'sent' | 'failed' | 'disabled' | undefined;
     if (statusChanged) {
       const settings: any = await SiteSettings.findOne({ key: 'main' }).select('notificationPreferences').lean();
       const shouldNotify = settings?.notificationPreferences?.orderStatus === true;
-      const recipient = enquiry.customerSnapshot?.email;
-      if (!shouldNotify || !enquiry.contactConsent || !recipient) statusNotification = 'disabled';
-      else {
-        const event = enquiry.statusHistory[enquiry.statusHistory.length - 1];
-        const delivery = await sendEmail({
+      const recipient = String(enquiry.customerSnapshot?.email || '').trim();
+      const statusEventId = randomUUID();
+      const notificationKey = `status/${id}/${statusEventId}`;
+      const notificationAllowed = orderStatusNotificationAllowed({
+        contactConsent: enquiry.contactConsent,
+        preference: shouldNotify,
+        recipient,
+      });
+      const initialStatus = notificationAllowed ? 'pending' : 'disabled';
+      await Enquiry.updateOne(
+        { _id: id },
+        { $push: { statusNotificationHistory: { status: enquiry.status, at: new Date(), statusEventId, notificationKey, deliveryStatus: initialStatus } } },
+      );
+      statusNotification = initialStatus;
+      if (notificationAllowed) {
+        statusNotification = await enqueueOrderStatusNotification({
+          key: notificationKey,
+          kind: 'enquiry-status',
           to: recipient,
           subject: `Enquiry ${enquiry.reference} status update · Hanumanji Agro`,
           html: statusUpdateEmail({ reference: enquiry.reference, name: enquiry.customerSnapshot?.name || 'there', status: enquiry.status }),
-          idempotencyKey: `status/${id}/${String(event?._id || Date.now())}`,
-        });
-        statusNotification = delivery.status;
-        enquiry.statusNotificationHistory.push({ status: enquiry.status, at: new Date(), deliveryStatus: delivery.status, emailId: delivery.id });
-        await enquiry.save();
+          entityType: 'Enquiry',
+          entityId: id,
+          statusField: 'notificationStatus',
+          idField: 'notificationId',
+          statusEventId,
+        }, enqueueEmailNotification);
+        await Enquiry.updateOne(
+          { _id: id, 'statusNotificationHistory.statusEventId': statusEventId },
+          { $set: { 'statusNotificationHistory.$.deliveryStatus': statusNotification } },
+        );
       }
     }
     return NextResponse.json({ ok: true, ...(data.quotation ? { total: enquiry.quotation.total } : {}), ...(statusNotification ? { statusNotification } : {}) });
