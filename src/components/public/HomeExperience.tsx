@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import CatalogueError from '@/components/public/CatalogueError';
 import { clearSubmissionKey, getSubmissionKey } from '@/lib/submission-key';
 import { phoneDigits, usePublicSettings } from '@/lib/use-public-settings';
+import { addEnquirySelection, MAX_ENQUIRY_PRODUCTS, normalizeEnquirySelection } from '@/lib/enquiry-selection';
 
 export type CatalogProduct = { _id?: string; name: string; slug: string; category: string; description: string; image?: string; status?: string; featured?: boolean };
 type CartLine = { product: CatalogProduct; quantity: number; unit: string };
@@ -93,7 +94,7 @@ export default function HomeExperience({ products, catalogueError = false }: { p
   const categories = useMemo(() => ['All', ...Array.from(new Set(products.map(p => p.category)))], [products]);
   const shown = useMemo(() => products.filter(p => (category === 'All' || p.category === category) && p.name.toLowerCase().includes(search.toLowerCase())), [products, category, search]);
   const persist = (next: CartLine[]) => { setCart(next); localStorage.setItem('ha-cart', JSON.stringify(next)); };
-  const add = (p: CatalogProduct) => { const found = cart.find(x => x.product.slug === p.slug); persist(found ? cart : [...cart, { product: p, quantity: 1, unit: 'kg' }]); setDrawerOpen(true); };
+  const add = (p: CatalogProduct) => { const result = addEnquirySelection(normalizeEnquirySelection(cart), { product: p, quantity: 1, unit: 'kg' }); if (result.limited) { setNotice(`You can select up to ${MAX_ENQUIRY_PRODUCTS} different products.`); return; } persist(result.lines); setDrawerOpen(true); };
   const quantity = (slug: string, q: number) => { if (!Number.isFinite(q) || q <= 0) return; persist(cart.map(x => x.product.slug === slug ? { ...x, quantity: q } : x)); };
   const unit = (slug: string, u: string) => persist(cart.map(x => x.product.slug === slug ? { ...x, unit: u } : x));
   const remove = (slug: string) => persist(cart.filter(x => x.product.slug !== slug));

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { owner } from '@/lib/auth';
 import { db } from '@/lib/db';
-import { sendEmail, supplierOwnerEmail } from '@/lib/email';
+import { supplierOwnerEmail } from '@/lib/email';
+import { enqueueEmailNotification } from '@/lib/email-outbox';
 import { AuditLog, SiteSettings, SupplierEnquiry } from '@/lib/models';
 import { sameOrigin, tooLarge } from '@/lib/security';
 
@@ -22,17 +23,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (settings?.notificationPreferences?.ownerEmail === false) return NextResponse.json({ error: 'Owner email notifications are disabled in settings.' }, { status: 409 });
     const to = process.env.OWNER_NOTIFICATION_EMAIL || settings?.notificationEmail;
     if (!to) return NextResponse.json({ error: 'Owner notification email is not configured.' }, { status: 503 });
-    const delivery = await sendEmail({
+    const delivery = await enqueueEmailNotification({
+      key: `supplier-owner/${id}`,
+      kind: 'supplier-owner',
       to,
       subject: 'New farmer and supplier enquiry · Hanumanji Agro',
       html: supplierOwnerEmail({ id, name: submission.name, phone: submission.phone, email: submission.email, product: submission.product, location: submission.location, quantity: submission.quantity, period: submission.period, description: submission.description }),
-      idempotencyKey: `supplier-owner/${id}`,
-    });
-    submission.notificationStatus = delivery.status;
-    if (delivery.id) submission.notificationId = delivery.id;
-    await submission.save();
+      entityType: 'SupplierEnquiry',
+      entityId: String(submission._id),
+      statusField: 'notificationStatus',
+      idField: 'notificationId',
+    }, true);
+    if (!delivery.queued && delivery.status !== 'sent') {
+      submission.notificationStatus = 'failed';
+      await submission.save();
+    }
     await AuditLog.create({ actor: admin._id, action: 'notification.supplier_retry', entity: 'SupplierEnquiry', entityId: id, metadata: { status: delivery.status } });
-    return NextResponse.json({ status: delivery.status });
+    return NextResponse.json({ status: delivery.status, duplicate: delivery.duplicate || false });
   } catch {
     return NextResponse.json({ error: 'Unable to retry the supplier notification.' }, { status: 503 });
   }

@@ -1,19 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { acknowledgementEmail, sendEmail } from '@/lib/email';
+import { acknowledgementEmail } from '@/lib/email';
+import { enqueueEmailNotification } from '@/lib/email-outbox';
 import { notifyEnquiryOwner } from '@/lib/enquiry-notifications';
 import { db } from '@/lib/db';
 import { Customer, Enquiry, Product, SiteSettings } from '@/lib/models';
-import { audit, rateLimit, sameOrigin, tooLarge } from '@/lib/security';
+import { audit, rateLimit, readJsonBody, sameOrigin } from '@/lib/security';
+import { MAX_ENQUIRY_PRODUCTS, publicPhoneSchema, enquiryUnitSchema, distinctObjectIds } from '@/lib/validation';
 
 export const runtime = 'nodejs';
+const MAX_BODY_BYTES = 40 * 1024;
 
-const normalizePhone = (value: string) => value.replace(/\D/g, '');
 const emailSchema = z.union([z.string().trim().email().max(254).transform((email) => email.toLowerCase()), z.literal('')]).optional();
-const itemSchema = z.object({ productId: z.string().regex(/^[a-f\d]{24}$/i), quantity: z.number().positive().max(1e6), unit: z.string().trim().max(24).default('kg') });
+const itemSchema = z.object({ productId: z.string().regex(/^[a-f\d]{24}$/i), quantity: z.number().finite().positive().max(1e6), unit: enquiryUnitSchema.default('kg') });
 const schema = z.object({
   name: z.string().trim().min(2).max(120),
-  phone: z.string().trim().regex(/^\+?[\d\s().-]+$/).transform(normalizePhone).refine((phone) => phone.length >= 7 && phone.length <= 15),
+  phone: publicPhoneSchema,
   email: emailSchema,
   customerType: z.enum(['Individual', 'Business']),
   company: z.string().trim().max(160).optional(),
@@ -23,8 +25,11 @@ const schema = z.object({
   message: z.string().trim().max(3000).optional(),
   consent: z.literal(true),
   enquiryType: z.enum(['Quotation', 'Business', 'Contact']).default('Quotation'),
-  items: z.array(itemSchema).max(30).default([]),
+  items: z.array(itemSchema).max(MAX_ENQUIRY_PRODUCTS).default([]),
 }).superRefine((data, ctx) => {
+  if (distinctObjectIds(data.items.map((item) => item.productId)) > MAX_ENQUIRY_PRODUCTS) {
+    ctx.addIssue({ code: 'custom', path: ['items'], message: 'A maximum of 30 distinct products is allowed.' });
+  }
   if (data.enquiryType === 'Quotation' && data.items.length === 0) ctx.addIssue({ code: 'custom', path: ['items'], message: 'Add at least one product.' });
   if (data.enquiryType === 'Business' && (!data.subject || data.subject.length < 2)) ctx.addIssue({ code: 'custom', path: ['subject'], message: 'Add an enquiry subject.' });
 });
@@ -32,8 +37,6 @@ const schema = z.object({
 const validIdempotencyKey = z.string().uuid();
 
 export async function POST(req: NextRequest) {
-  const tooBig = tooLarge(req, 40 * 1024);
-  if (tooBig) return tooBig;
   if (!sameOrigin(req)) return NextResponse.json({ error: 'Invalid request origin.' }, { status: 403 });
 
   const keyResult = validIdempotencyKey.safeParse(req.headers.get('idempotency-key'));
@@ -42,12 +45,13 @@ export async function POST(req: NextRequest) {
   try {
     const limit = await rateLimit(req, 'public-enquiry', 8);
     if (!limit.allowed) return NextResponse.json({ error: 'Too many requests. Please try again later.' }, { status: 429, headers: { 'Retry-After': String(limit.retryAfter) } });
-    const parsed = schema.safeParse(await req.json());
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
+    if (!body.ok) return body.response;
+    const parsed = schema.safeParse(body.data);
     if (!parsed.success) return NextResponse.json({ error: 'Please check the enquiry details.' }, { status: 400 });
 
     const data = parsed.data;
     await db();
-    await Enquiry.collection.createIndex({ idempotencyKey: 1 }, { unique: true, sparse: true });
     const existing: any = await Enquiry.findOne({ idempotencyKey: keyResult.data }).select('reference notificationStatus acknowledgementStatus').lean();
     if (existing) return NextResponse.json({ reference: existing.reference, notificationStatus: existing.notificationStatus, acknowledgementStatus: existing.acknowledgementStatus, duplicate: true }, { status: 200 });
 
@@ -116,21 +120,24 @@ export async function POST(req: NextRequest) {
       recipient: ownerEmail,
       enabled: settingsAvailable && preferences.ownerEmail !== false,
       available: settingsAvailable,
+      entityId: String(enquiry._id),
       record: async (outcome) => {
-        const changes = {
-          notificationStatus: outcome.status,
-          ...(outcome.id ? { notificationId: outcome.id } : {}),
-        };
         let persisted = true;
-        try {
-          await Enquiry.updateOne({ _id: enquiry._id }, { $set: changes });
-        } catch {
-          persisted = false;
+        if (!outcome.queued) {
+          try {
+            await Enquiry.updateOne(
+              { _id: enquiry._id },
+              { $set: { notificationStatus: outcome.status, ...(outcome.id ? { notificationId: outcome.id } : {}) } },
+            );
+          } catch {
+            persisted = false;
+          }
         }
         try {
-          await audit(undefined, 'notification.enquiry_owner', 'Enquiry', String(enquiry._id), {
+          await audit(undefined, outcome.queued ? 'notification.enquiry_owner_queued' : 'notification.enquiry_owner', 'Enquiry', String(enquiry._id), {
             provider: 'Resend',
             status: outcome.status,
+            queued: outcome.queued,
             ...(outcome.id ? { providerMessageId: outcome.id } : {}),
             ...('errorCode' in outcome && outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
             ...('httpStatus' in outcome && outcome.httpStatus ? { httpStatus: outcome.httpStatus } : {}),
@@ -142,23 +149,52 @@ export async function POST(req: NextRequest) {
       },
     });
     if (!ownerNotification.recorded) console.error('Could not fully record enquiry owner notification outcome.', { reference });
-    let notificationStatus = ownerNotification.status;
+    const notificationStatus = ownerNotification.status;
     const customerAcknowledgementEnabled = preferences.customerAcknowledgement === true;
     let acknowledgementStatus: 'pending' | 'sent' | 'failed' | 'disabled' = customerAcknowledgementEnabled ? 'pending' : 'disabled';
     let acknowledgementId: string | undefined;
     if (customerAcknowledgementEnabled && data.consent && data.email && process.env.RESEND_API_KEY && process.env.EMAIL_FROM && process.env.DISABLE_EXTERNAL_NOTIFICATIONS !== '1') {
       try {
-        const delivery = await sendEmail({ to: data.email, subject: `We received your enquiry ${reference} · Hanumanji Agro`, html: acknowledgementEmail({ reference, name: data.name, type: data.enquiryType }), idempotencyKey: `enquiry-customer/${reference}` });
-        acknowledgementStatus = delivery.status;
-        acknowledgementId = delivery.id;
+        const queued = await enqueueEmailNotification({
+          key: `enquiry-customer/${reference}`,
+          kind: 'enquiry-acknowledgement',
+          to: data.email,
+          subject: `We received your enquiry ${reference} · Hanumanji Agro`,
+          html: acknowledgementEmail({ reference, name: data.name, type: data.enquiryType }),
+          entityType: 'Enquiry',
+          entityId: String(enquiry._id),
+          statusField: 'acknowledgementStatus',
+          idField: 'acknowledgementId',
+        });
+        acknowledgementStatus = queued.status;
+        acknowledgementId = queued.id;
+        if (!queued.queued) {
+          await Enquiry.updateOne(
+            { _id: enquiry._id },
+            { $set: { acknowledgementStatus, ...(acknowledgementId ? { acknowledgementId } : {}) } },
+          );
+        }
       } catch {
         acknowledgementStatus = 'failed';
+        try {
+          await Enquiry.updateOne({ _id: enquiry._id }, { $set: { acknowledgementStatus } });
+        } catch {
+          console.error('Could not record customer acknowledgement outcome.', { reference, status: acknowledgementStatus });
+        }
       }
     }
-    try {
-      await Enquiry.updateOne({ _id: enquiry._id }, { $set: { acknowledgementStatus, ...(acknowledgementId ? { acknowledgementId } : {}) } });
-    } catch {
-      console.error('Could not record customer acknowledgement outcome.', { reference, status: acknowledgementStatus });
+    if (!customerAcknowledgementEnabled) {
+      try {
+        await Enquiry.updateOne({ _id: enquiry._id }, { $set: { acknowledgementStatus } });
+      } catch {
+        console.error('Could not record customer acknowledgement outcome.', { reference, status: acknowledgementStatus });
+      }
+    } else if (!data.consent || !data.email || !process.env.RESEND_API_KEY || !process.env.EMAIL_FROM || process.env.DISABLE_EXTERNAL_NOTIFICATIONS === '1') {
+      try {
+        await Enquiry.updateOne({ _id: enquiry._id }, { $set: { acknowledgementStatus } });
+      } catch {
+        console.error('Could not record customer acknowledgement outcome.', { reference, status: acknowledgementStatus });
+      }
     }
 
     return NextResponse.json({ reference, notificationStatus, acknowledgementStatus }, { status: 201 });

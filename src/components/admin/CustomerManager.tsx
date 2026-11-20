@@ -12,6 +12,9 @@ export default function CustomerManager() {
   const [total, setTotal] = useState(0);
   const [active, setActive] = useState<any>(null);
   const [history, setHistory] = useState<any[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPages, setHistoryPages] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -33,15 +36,18 @@ export default function CustomerManager() {
 
   useEffect(() => { void load(); }, [load]);
 
-  async function open(customer: any) {
+  async function open(customer: any, requestedPage = 1) {
     setActive(customer);
     setError('');
     try {
-      const response = await fetch(`/api/admin/customers/${customer._id}`, { cache: 'no-store' });
+      const response = await fetch(`/api/admin/customers/${customer._id}?page=${requestedPage}&limit=20`, { cache: 'no-store' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to load enquiry history.');
       setActive(data.customer);
       setHistory(data.enquiries || []);
+      setHistoryPage(data.page || 1);
+      setHistoryPages(data.pages || 1);
+      setHistoryTotal(data.total || 0);
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to load enquiry history.'); }
   }
 
@@ -51,6 +57,6 @@ export default function CustomerManager() {
     {loading ? <div className="admin-empty">Loading customers…</div> : rows.length === 0 ? <div className="admin-empty">Customer records appear when an enquiry is submitted.</div> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Customer</th><th>Phone</th><th>Email</th><th>Company</th><th>Type</th><th>Enquiries</th><th>Last enquiry</th></tr></thead><tbody>{rows.map((customer) => <tr key={customer._id} onClick={() => void open(customer)} className="clickable-row"><td><button className="table-link">{customer.name}</button></td><td>{customer.phone}</td><td>{customer.email || '—'}</td><td>{customer.company || '—'}</td><td>{customer.type || '—'}</td><td>{customer.enquiryCount}</td><td>{customer.lastEnquiryAt ? new Date(customer.lastEnquiryAt).toLocaleDateString('en-IN') : '—'}</td></tr>)}</tbody></table></div>}
     <div className="admin-pagination"><span>{total} customers</span><div><button disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} of {pages}</span><button disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button></div></div>
   </section>
-  {active && <section className="admin-panel customer-history"><div className="admin-panel-head"><div><small>CUSTOMER HISTORY</small><h2>{active.name}</h2></div><button className="admin-secondary" onClick={() => setActive(null)}>Close</button></div><p>{active.phone} · {active.email || 'No email'} · {active.company || 'Individual'}</p>{history.length === 0 ? <div className="admin-empty">No enquiry history.</div> : history.map((enquiry) => <Link href={`/admin/enquiries/${enquiry._id}`} className="history-row" key={enquiry._id}><span>{enquiry.reference}</span><span>{enquiry.enquiryType}</span><span>{enquiry.status}</span><span>{new Date(enquiry.createdAt).toLocaleDateString('en-IN')}</span></Link>)}</section>}
+  {active && <section className="admin-panel customer-history"><div className="admin-panel-head"><div><small>CUSTOMER HISTORY</small><h2>{active.name}</h2></div><button className="admin-secondary" onClick={() => setActive(null)}>Close</button></div><p>{active.phone} · {active.email || 'No email'} · {active.company || 'Individual'}</p>{history.length === 0 ? <div className="admin-empty">No enquiry history.</div> : history.map((enquiry) => <Link href={`/admin/enquiries/${enquiry._id}`} className="history-row" key={enquiry._id}><span>{enquiry.reference}</span><span>{enquiry.enquiryType}</span><span>{enquiry.status}</span><span>{new Date(enquiry.createdAt).toLocaleDateString('en-IN')}</span></Link>)}{historyTotal > 20 && <div className="admin-pagination"><span>{historyTotal} enquiries</span><div><button disabled={historyPage <= 1} onClick={() => void open(active, historyPage - 1)}>Previous</button><span>Page {historyPage} of {historyPages}</span><button disabled={historyPage >= historyPages} onClick={() => void open(active, historyPage + 1)}>Next</button></div></div>}</section>}
   </div>;
 }

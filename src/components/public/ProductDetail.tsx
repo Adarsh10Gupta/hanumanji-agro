@@ -5,6 +5,7 @@ import { useState } from 'react';
 import type { CatalogProduct } from './HomeExperience';
 import PublicImage from './PublicImage';
 import { phoneDigits, usePublicSettings } from '@/lib/use-public-settings';
+import { addEnquirySelection, MAX_ENQUIRY_PRODUCTS, normalizeEnquirySelection } from '@/lib/enquiry-selection';
 
 type Detail = {
   _id: string; name: string; slug: string; category: string; description: string;
@@ -24,10 +25,13 @@ export default function ProductDetail({ product, related }: { product: Detail; r
   function add() {
     let cart: Array<{ product?: Detail; quantity?: number; unit?: string }> = [];
     try { cart = JSON.parse(localStorage.getItem('ha-cart') || '[]'); } catch { /* Start with an empty enquiry. */ }
-    const existing = cart.find((line) => line.product?.slug === product.slug);
-    if (existing) existing.quantity = (existing.quantity || 0) + quantity;
-    else cart.push({ product, quantity, unit: product.unit || 'kg' });
-    localStorage.setItem('ha-cart', JSON.stringify(cart));
+    const lines = normalizeEnquirySelection(cart.filter((line): line is { product: Detail; quantity: number; unit: string } => Boolean(line.product?.slug)));
+    const result = addEnquirySelection(lines, { product, quantity, unit: product.unit || 'kg' }, true);
+    if (result.limited) {
+      setNotice(`You can select up to ${MAX_ENQUIRY_PRODUCTS} different products.`);
+      return;
+    }
+    localStorage.setItem('ha-cart', JSON.stringify(result.lines));
     setNotice('Added to your enquiry.');
   }
 

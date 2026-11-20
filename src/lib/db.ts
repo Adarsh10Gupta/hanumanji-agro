@@ -21,8 +21,9 @@ export async function db() {
 
   if (!cache.promise) {
     cache.promise = mongoose.connect(uri, {
-      dbName: 'hanumanji_agro',
+      dbName: process.env.MONGODB_DATABASE_NAME || 'hanumanji_agro',
       bufferCommands: false,
+      autoIndex: false,
       maxPoolSize: 10,
       minPoolSize: 0,
       serverSelectionTimeoutMS: 10000,

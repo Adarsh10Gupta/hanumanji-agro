@@ -10,7 +10,7 @@ export default async function Home() {
   try {
     await db();
     const visibleCategories = await Category.distinct('name', { published: true });
-    const records = visibleCategories.length ? await Product.find({ published: true, archivedAt: { $exists: false }, category: { $in: visibleCategories } }).sort({ featured: -1, name: 1 }).lean() : [];
+    const records = visibleCategories.length ? await Product.find({ published: true, archivedAt: { $exists: false }, category: { $in: visibleCategories } }).select('name slug category description image status featured').sort({ featured: -1, name: 1, _id: 1 }).limit(12).lean() : [];
     products = records.map((product: any) => ({ _id: String(product._id), name: product.name, slug: product.slug, category: product.category, description: product.description, image: product.image, status: product.status, featured: product.featured }));
   } catch {
     catalogueError = true;

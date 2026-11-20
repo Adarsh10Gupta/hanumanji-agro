@@ -6,6 +6,7 @@ import type { CatalogProduct } from './HomeExperience';
 import { productImage } from '@/lib/media';
 import { clearSubmissionKey, getSubmissionKey } from '@/lib/submission-key';
 import { phoneDigits, usePublicSettings } from '@/lib/use-public-settings';
+import { normalizeEnquirySelection, MAX_ENQUIRY_PRODUCTS } from '@/lib/enquiry-selection';
 
 type Line = { product: CatalogProduct; quantity: number; unit: string };
 
@@ -20,8 +21,13 @@ export default function EnquiryPageForm() {
   const [submittedProducts, setSubmittedProducts] = useState<string[]>([]);
 
   useEffect(() => {
-    try { setLines(JSON.parse(localStorage.getItem('ha-cart') || '[]')); } catch { setLines([]); }
-    fetch('/api/products').then((response) => response.ok ? response.json() : []).then((products: CatalogProduct[]) => {
+    let cart: Line[] = [];
+    try { cart = JSON.parse(localStorage.getItem('ha-cart') || '[]'); } catch { cart = []; }
+    const normalized = normalizeEnquirySelection(cart);
+    if (normalized.length < new Set(cart.map((line) => line.product.slug)).size) setError(`Your saved selection was limited to ${MAX_ENQUIRY_PRODUCTS} different products.`);
+    setLines(normalized);
+    const slugs = [...new Set(normalized.map((line) => line.product.slug))];
+    fetch(`/api/products?slugs=${encodeURIComponent(slugs.join(','))}`).then((response) => response.ok ? response.json() : []).then((products: CatalogProduct[]) => {
       setLines((current) => current.map((line) => ({ ...line, product: { ...line.product, ...products.find((product) => product.slug === line.product.slug) } })));
     }).finally(() => setReady(true));
   }, []);

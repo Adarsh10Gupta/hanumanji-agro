@@ -59,6 +59,7 @@ export default function EnquiryDetail({ id }: { id: string }) {
   }
 
   async function save() {
+    if (busy) return;
     setBusy(true); setError(''); setMessage('');
     try {
       const response = await fetch(`/api/admin/enquiries/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, notes, quotation: quotationPayload() }) });
@@ -72,6 +73,7 @@ export default function EnquiryDetail({ id }: { id: string }) {
   }
 
   async function send() {
+    if (busy) return;
     setBusy(true); setError(''); setMessage('');
     try {
       const response = await fetch(`/api/admin/enquiries/${id}/send-quotation`, {
@@ -79,7 +81,11 @@ export default function EnquiryDetail({ id }: { id: string }) {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Quotation was not sent.');
-      setMessage(`Quotation email accepted by the provider. Total ${inr.format(data.total)}.`);
+      setMessage(data.queued
+        ? `Quotation saved and queued for delivery. Total ${inr.format(data.total)}.`
+        : data.sent
+          ? `Quotation email accepted by the provider. Total ${inr.format(data.total)}.`
+          : `Quotation saved. Total ${inr.format(data.total)}.`);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Quotation was not sent.');

@@ -16,91 +16,96 @@ const enquiry = {
   items: [{ quantity: 500, unit: 'litres', snapshot: { name: 'Mustard Oil' } }],
 };
 
-test('enabled new enquiry sends one detailed Resend notification to the configured owner', async () => {
-  const sent: Array<{ to: string; idempotencyKey: string; html: string }> = [];
+test('enabled new enquiry queues one detailed owner notification with stable deduplication', async () => {
+  const queued: Array<{ to: string; key: string; html: string }> = [];
   const recorded: Array<{ status: string; id?: string }> = [];
   const result = await notifyEnquiryOwner({
     enquiry,
+    entityId: '507f1f77bcf86cd799439011',
     recipient: 'owner-controlled@example.com',
     enabled: true,
-    send: async (input) => {
-      sent.push(input);
-      return { status: 'sent', id: 'resend-message-123' };
+    enqueue: async (input) => {
+      queued.push({ to: input.to, key: input.key, html: input.html });
+      return { status: 'pending', queued: true };
     },
     record: async (outcome) => { recorded.push(outcome); },
   });
 
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].to, 'owner-controlled@example.com');
-  assert.equal(sent[0].idempotencyKey, 'enquiry-owner/HA-2026-ABC123');
-  assert.match(sent[0].html, /HA-2026-ABC123/);
-  assert.match(sent[0].html, /Rahul/);
-  assert.match(sent[0].html, /rahul@example\.com/);
-  assert.match(sent[0].html, /919876543210/);
-  assert.match(sent[0].html, /Mustard Oil — 500 litres/);
-  assert.match(sent[0].html, /Kolkata, West Bengal/);
-  assert.match(sent[0].html, /Please share pricing\./);
-  assert.deepEqual(recorded, [{ status: 'sent', id: 'resend-message-123' }]);
-  assert.equal(result.status, 'sent');
-  assert.equal(result.id, 'resend-message-123');
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].to, 'owner-controlled@example.com');
+  assert.equal(queued[0].key, 'enquiry-owner/HA-2026-ABC123');
+  assert.match(queued[0].html, /HA-2026-ABC123/);
+  assert.match(queued[0].html, /Rahul/);
+  assert.match(queued[0].html, /rahul@example\.com/);
+  assert.match(queued[0].html, /919876543210/);
+  assert.match(queued[0].html, /Mustard Oil — 500 litres/);
+  assert.match(queued[0].html, /Kolkata, West Bengal/);
+  assert.match(queued[0].html, /Please share pricing\./);
+  assert.deepEqual(recorded, [{ status: 'pending', queued: true }]);
+  assert.equal(result.status, 'pending');
+  assert.equal(result.queued, true);
   assert.equal(result.recorded, true);
 });
 
-test('disabled owner notification preference skips Resend and records disabled status', async () => {
-  let sendCount = 0;
+test('disabled owner notification preference skips queuing and records disabled status', async () => {
+  let enqueueCount = 0;
   const recorded: Array<{ status: string }> = [];
   const result = await notifyEnquiryOwner({
     enquiry,
+    entityId: '507f1f77bcf86cd799439011',
     recipient: 'owner-controlled@example.com',
     enabled: false,
-    send: async () => {
-      sendCount += 1;
-      return { status: 'sent', id: 'unexpected' };
+    enqueue: async () => {
+      enqueueCount += 1;
+      return { status: 'pending', queued: true };
     },
     record: async (outcome) => { recorded.push(outcome); },
   });
 
-  assert.equal(sendCount, 0);
-  assert.deepEqual(recorded, [{ status: 'disabled' }]);
+  assert.equal(enqueueCount, 0);
+  assert.deepEqual(recorded, [{ status: 'disabled', queued: false }]);
   assert.equal(result.status, 'disabled');
   assert.equal(result.recorded, true);
 });
 
-test('Resend rejection is recorded as failed without throwing or losing the saved enquiry', async () => {
+test('global budget or queue rejection is recorded as failed without losing the saved enquiry', async () => {
   const recorded: Array<{ status: string; errorCode?: string }> = [];
   const result = await notifyEnquiryOwner({
     enquiry,
+    entityId: '507f1f77bcf86cd799439011',
     recipient: 'owner-controlled@example.com',
     enabled: true,
-    send: async () => ({ status: 'failed', errorCode: 'provider_rejected', httpStatus: 422 }),
+    enqueue: async () => ({ status: 'failed', errorCode: 'daily_email_budget_exceeded', queued: false }),
     record: async (outcome) => { recorded.push(outcome); },
   });
 
   assert.equal(result.status, 'failed');
-  assert.equal(result.errorCode, 'provider_rejected');
+  assert.equal(result.errorCode, 'daily_email_budget_exceeded');
   assert.equal(result.recorded, true);
-  assert.deepEqual(recorded, [{ status: 'failed', errorCode: 'provider_rejected', httpStatus: 422 }]);
+  assert.deepEqual(recorded, [{ status: 'failed', errorCode: 'daily_email_budget_exceeded', queued: false }]);
 });
 
-test('notification send and recording failures do not throw after enquiry creation', async () => {
-  const sendResult = await notifyEnquiryOwner({
+test('queue and recording failures are surfaced without throwing after enquiry creation', async () => {
+  const queueResult = await notifyEnquiryOwner({
     enquiry,
+    entityId: '507f1f77bcf86cd799439011',
     recipient: 'owner-controlled@example.com',
     enabled: true,
-    send: async () => { throw new Error('test-only transport failure'); },
+    enqueue: async () => { throw new Error('test-only queue failure'); },
     record: async () => {},
   });
-  assert.equal(sendResult.status, 'failed');
-  assert.equal(sendResult.errorCode, 'notification_send_error');
+  assert.equal(queueResult.status, 'failed');
+  assert.equal(queueResult.errorCode, 'notification_queue_error');
 
   const recordResult = await notifyEnquiryOwner({
     enquiry,
+    entityId: '507f1f77bcf86cd799439011',
     recipient: 'owner-controlled@example.com',
     enabled: true,
-    send: async () => ({ status: 'sent', id: 'resend-message-123' }),
+    enqueue: async () => ({ status: 'pending', queued: true }),
     record: async () => { throw new Error('test-only persistence failure'); },
   });
-  assert.equal(recordResult.status, 'sent');
+  assert.equal(recordResult.status, 'pending');
   assert.equal(recordResult.recorded, false);
 });
 
@@ -118,10 +123,15 @@ test('owner email escapes customer content and displays each enquiry field', () 
 
 test('public enquiry route records notification outcomes and reuses stable enquiry idempotency on retries', async () => {
   const route = await readFile('src/app/api/enquiries/route.ts', 'utf8');
+  const supplierRoute = await readFile('src/app/api/suppliers/route.ts', 'utf8');
   assert.match(route, /process\.env\.OWNER_NOTIFICATION_EMAIL\?\.trim\(\)\s*\|\|\s*settings\?\.notificationEmail/);
   assert.match(route, /settingsAvailable && preferences\.ownerEmail !== false/);
   assert.match(route, /notification\.enquiry_owner/);
   assert.match(route, /providerMessageId:\s*outcome\.id/);
   assert.match(route, /notificationStatus:\s*outcome\.status/);
   assert.match(route, /findOne\(\{ idempotencyKey: keyResult\.data \}\)/);
+  assert.match(route, /enqueueEmailNotification/);
+  assert.match(supplierRoute, /enqueueEmailNotification/);
+  assert.doesNotMatch(route, /collection\.createIndex|sendEmail\(/);
+  assert.doesNotMatch(supplierRoute, /collection\.createIndex|sendEmail\(/);
 });

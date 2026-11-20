@@ -1,6 +1,7 @@
 import type { MetadataRoute } from 'next';
 import { db } from '@/lib/db';
-import { Product } from '@/lib/models';
+import { Category, Product } from '@/lib/models';
+import { SITEMAP_PRODUCT_BATCH_SIZE } from '@/lib/catalog-pagination';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,11 +12,23 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
   try {
     await db();
-    const products = await Product.find({ published: true, archivedAt: { $exists: false } }).select('slug updatedAt').lean();
-    pages.push(...products.map((product: any) => ({
-      url: `${root}/products/${product.slug}`,
-      lastModified: product.updatedAt || new Date(),
-    })));
+    const visibleCategories = await Category.distinct('name', { published: true });
+    let lastId: unknown;
+    while (true) {
+      const filter = {
+        published: true,
+        archivedAt: { $exists: false },
+        category: { $in: visibleCategories },
+        ...(lastId ? { _id: { $gt: lastId } } : {}),
+      };
+      const products = await Product.find(filter).select('slug updatedAt').sort({ _id: 1 }).limit(SITEMAP_PRODUCT_BATCH_SIZE).lean();
+      pages.push(...products.map((product: any) => ({
+        url: `${root}/products/${product.slug}`,
+        lastModified: product.updatedAt || new Date(),
+      })));
+      if (products.length < SITEMAP_PRODUCT_BATCH_SIZE) break;
+      lastId = products[products.length - 1]._id;
+    }
   } catch {
     // Static pages remain available if the catalogue database is offline.
   }

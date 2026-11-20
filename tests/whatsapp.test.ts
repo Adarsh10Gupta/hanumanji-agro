@@ -66,9 +66,12 @@ test('reply draft includes available enquiry details and original customer messa
   assert.match(message, /Your message: Please share wholesale pricing\./);
 });
 
-test('enquiry contact tracking uses the existing owner-authenticated status and audit flow', async () => {
+test('enquiry status changes use an owner-authenticated compare-and-set and durable notification outbox', async () => {
   const route = await readFile('src/app/api/admin/enquiries/[id]/route.ts', 'utf8');
   assert.match(route, /export async function PATCH[\s\S]*?const admin = await owner\(\)/);
-  assert.match(route, /enquiry\.statusHistory\.push\(\{ status: data\.status, at: new Date\(\), actor: admin\._id \}\)/);
+  assert.match(route, /Enquiry\.updateOne\(\s*\{\s*_id: id, status: previousStatus\s*\}/);
+  assert.match(route, /enqueueEmailNotification/);
+  assert.match(route, /kind: 'enquiry-status'/);
+  assert.doesNotMatch(route, /sendEmail\(/);
   assert.match(route, /audit\(admin\._id, 'enquiry\.update'/);
 });

@@ -1,3 +1,5 @@
+import { reserveDailyEmail } from './email-budget';
+
 export type EmailDelivery = { status: 'pending' | 'sent' | 'failed'; id?: string; errorCode?: string; httpStatus?: number };
 
 export function escapeHtml(value: unknown) {
@@ -55,13 +57,19 @@ export function emailIntegrationTestEmail() {
   return brandedEmail('Email integration test', '<p>This is the requested Hanumanji Agro email integration test.</p><p>The server connected to Resend and Resend accepted this message.</p>');
 }
 
-export async function sendEmail(input: { to: string; subject: string; html: string; idempotencyKey: string; from?: string }): Promise<EmailDelivery> {
+export async function sendEmail(
+  input: { to: string; subject: string; html: string; idempotencyKey: string; from?: string },
+  dependencies: { reserveBudget?: typeof reserveDailyEmail; fetcher?: typeof fetch } = {},
+): Promise<EmailDelivery> {
   if (process.env.DISABLE_EXTERNAL_NOTIFICATIONS === '1') return { status: 'pending', errorCode: 'notifications_disabled' };
   const apiKey = process.env.RESEND_API_KEY;
   const from = input.from || process.env.EMAIL_FROM;
   if (!apiKey || !from) return { status: 'pending', errorCode: !apiKey ? 'api_key_missing' : 'sender_missing' };
+  if (!await (dependencies.reserveBudget || reserveDailyEmail)(input.idempotencyKey)) {
+    return { status: 'pending', errorCode: 'daily_email_budget_exceeded' };
+  }
   try {
-    const response = await fetch('https://api.resend.com/emails', {
+    const response = await (dependencies.fetcher || fetch)('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': input.idempotencyKey },
       body: JSON.stringify({ from, to: [input.to], subject: input.subject, html: input.html }),
